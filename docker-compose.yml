@@ -1,26 +1,28 @@
-# MaxKB 本地验收编排：官方一体化镜像 + 挂载本次改动的源码文件
+# MaxKB 本地验收编排：使用由本项目全量源码构建的镜像（构建定义见 Dockerfile.app）
 #
 # 用法（在仓库根目录执行）：
-#   docker compose up -d
+#   docker compose up -d --build
 #   浏览器打开 http://localhost:8080
 # 默认账号：admin / MaxKB@123..
 #
 # 说明：
-#   1) 1panel/maxkb 是一体化镜像，容器内自带 PostgreSQL(pgvector) 与 Redis，
-#      MAXKB_DB_HOST / MAXKB_REDIS_HOST 保持 127.0.0.1 即可，无需额外服务。
-#   2) 只挂载本次改动的两个文件，避免覆盖镜像内的其他代码与已编译语言包。
-#      - pdf_split_handle.py：标题识别修复（本次验收重点）
-#      - pdf_ocr_helper.py  ：扫描版 PDF 的 OCR 兜底模块（被上面那个文件 import）
-# 3) 镜像版本与本地源码保持一致：本地源码为 git describe 的 v2.10.6-lts-39-g2c7c8c9f2，
-#    因此固定使用 v2.10.6-lts（其基础镜像 tag 20260903 与本地快照同期），避免 API 不兼容。
-#    如果镜像版本与本地源码差异较大导致异常，去掉 volumes 里的文件挂载即可回到官方原版。
-# 4) 数据用 Windows 绑定挂载 C:/maxkb（与官方文档一致），数据在资源管理器里直接可见、可直接备份。
-#    若想改回 Docker 命名卷（性能更好），把下面那行换成 maxkb-data:/opt/maxkb，
-#    并取消文件末尾 volumes: 段的注释。
+#   1) 镜像由 Dockerfile.app 构建：以官方 1panel/maxkb 一体化镜像为底座，
+#      叠加本仓库全量后端源码。容器内自带 PostgreSQL(pgvector) 与 Redis，
+#      MAXKB_DB_HOST / MAXKB_REDIS_HOST 保持默认的 127.0.0.1 即可，无需额外服务。
+#   2) 改动已经打进镜像，因此不再需要把源码文件挂载进容器。
+#      改完代码后重新执行 docker compose up -d --build 即可生效。
+#   3) 镜像版本与本地源码对应：本地源码为 v2.10.6-lts 标签之后 39 个提交，
+#      且 pyproject.toml 与 v2.10.6-lts 完全一致，故底座固定用 v2.10.6-lts，不存在依赖错配。
+#   4) 数据用 Windows 绑定挂载 C:/maxkb（与官方文档一致），在资源管理器里直接可见、可直接备份。
+#      若想改回 Docker 命名卷（性能更好），把下面那行换成 maxkb-data:/opt/maxkb，
+#      并取消文件末尾 volumes: 段的注释。
 
 services:
   maxkb:
-    image: 1panel/maxkb:v2.10.6-lts
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    image: maxkb-app:v2.10.6-lts
     container_name: maxkb-verify
     restart: unless-stopped
     ports:
@@ -31,8 +33,6 @@ services:
       - "127.0.0.1:16379:6379"
     volumes:
       - C:/maxkb:/opt/maxkb
-      - ./apps/common/handle/impl/text/pdf_split_handle.py:/opt/maxkb-app/apps/common/handle/impl/text/pdf_split_handle.py:ro
-      - ./apps/common/handle/impl/text/pdf_ocr_helper.py:/opt/maxkb-app/apps/common/handle/impl/text/pdf_ocr_helper.py:ro
     environment:
       - MAXKB_PDF_HEADING_PATTERN_ENABLE=true
       - MAXKB_PDF_OCR_ENABLE=true
