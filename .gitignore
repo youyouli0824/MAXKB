@@ -194,3 +194,5 @@ config.yml
 .SANDBOX_BANNED_HOSTS
 copilot-instructions.md
 .ai/
+# WorkBuddy local workspace data
+.workbuddy/

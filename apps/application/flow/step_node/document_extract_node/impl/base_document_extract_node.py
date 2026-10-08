@@ -8,10 +8,28 @@ from django.db.models import QuerySet
 from application.flow.common import WorkflowMode
 from application.flow.i_step_node import NodeResult
 from application.flow.step_node.document_extract_node.i_document_extract_node import IDocumentExtractNode
+from common.handle.impl.text.pdf_ocr_helper import clear_ocr_context, set_ocr_context
 from knowledge.models import File, FileSourceType
 from knowledge.serializers.document import split_handles, parse_table_handle_list, FileBufferHandle
 
 splitter = '\n`-----------------------------------`\n'
+
+
+def init_ocr_context(workflow_manage):
+    """扫描版 PDF 没有文本层, 需要用视觉模型做 OCR, 这里注入工作空间与默认视觉模型供 PdfSplitHandle 使用"""
+    workspace_id = None
+    model_id = None
+    try:
+        body = workflow_manage.get_body()
+        if isinstance(body, dict):
+            workspace_id = body.get('workspace_id')
+    except Exception:
+        workspace_id = None
+    try:
+        model_id = workflow_manage.get_default_model_setting('IMAGE').get('model_id')
+    except Exception:
+        model_id = None
+    set_ocr_context(workspace_id=workspace_id, model_id=model_id)
 
 
 class BaseDocumentExtractNode(IDocumentExtractNode):
@@ -63,19 +81,24 @@ class BaseDocumentExtractNode(IDocumentExtractNode):
                     new_file.save(file_bytes)
 
         document_list = []
-        for doc in document:
-            file = QuerySet(File).filter(id=doc['file_id']).first()
-            buffer = io.BytesIO(file.get_bytes())
-            buffer.name = doc['name']  # this is the important line
+        # 扫描版 PDF(无文本层)需要用视觉模型做 OCR, 注入工作空间与默认视觉模型
+        init_ocr_context(self.workflow_manage)
+        try:
+            for doc in document:
+                file = QuerySet(File).filter(id=doc['file_id']).first()
+                buffer = io.BytesIO(file.get_bytes())
+                buffer.name = doc['name']  # this is the important line
 
-            for split_handle in (parse_table_handle_list + split_handles):
-                if split_handle.support(buffer, get_buffer):
-                    # 回到文件头
-                    buffer.seek(0)
-                    file_content = split_handle.get_content(buffer, save_image)
-                    content.append('### ' + doc['name'] + '\n' + file_content)
-                    document_list.append({'id': str(file.id), 'name': doc['name'], 'content': file_content})
-                    break
+                for split_handle in (parse_table_handle_list + split_handles):
+                    if split_handle.support(buffer, get_buffer):
+                        # 回到文件头
+                        buffer.seek(0)
+                        file_content = split_handle.get_content(buffer, save_image)
+                        content.append('### ' + doc['name'] + '\n' + file_content)
+                        document_list.append({'id': str(file.id), 'name': doc['name'], 'content': file_content})
+                        break
+        finally:
+            clear_ocr_context()
 
         return NodeResult({'content': splitter.join(content), 'document_list': document_list}, {})
 

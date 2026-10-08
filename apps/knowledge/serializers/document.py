@@ -27,6 +27,7 @@ from common.handle.impl.table.xlsx_parse_table_handle import XlsxParseTableHandl
 from common.handle.impl.text.csv_split_handle import CsvSplitHandle
 from common.handle.impl.text.doc_split_handle import DocSplitHandle
 from common.handle.impl.text.html_split_handle import HTMLSplitHandle
+from common.handle.impl.text.pdf_ocr_helper import clear_ocr_context, set_ocr_context
 from common.handle.impl.text.pdf_split_handle import PdfSplitHandle
 from common.handle.impl.text.text_split_handle import TextSplitHandle
 from common.handle.impl.text.xls_split_handle import XlsSplitHandle
@@ -1266,16 +1267,21 @@ class DocumentSerializers(serializers.Serializer):
             file.seek(0)
 
             get_buffer = FileBufferHandle().get_buffer
-            for split_handle in split_handles:
-                if split_handle.support(file, get_buffer):
-                    result = split_handle.handle(file, pattern_list, with_filter, limit, get_buffer, self.save_image)
-                    if isinstance(result, list):
-                        for item in result:
-                            item["source_file_id"] = file_id
-                        return result
-                    result["source_file_id"] = file_id
-                    return [result]
-            result = default_split_handle.handle(file, pattern_list, with_filter, limit, get_buffer, self.save_image)
+            # 注入 OCR 上下文: 扫描版 PDF(无文本层)需要按工作空间解析视觉模型做 OCR
+            set_ocr_context(workspace_id=self.data.get("workspace_id"))
+            try:
+                for split_handle in split_handles:
+                    if split_handle.support(file, get_buffer):
+                        result = split_handle.handle(
+                            file, pattern_list, with_filter, limit, get_buffer, self.save_image
+                        )
+                        break
+                else:
+                    result = default_split_handle.handle(
+                        file, pattern_list, with_filter, limit, get_buffer, self.save_image
+                    )
+            finally:
+                clear_ocr_context()
             if isinstance(result, list):
                 for item in result:
                     item["source_file_id"] = file_id

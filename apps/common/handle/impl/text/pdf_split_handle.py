@@ -20,9 +20,11 @@ from pypdf import PdfReader
 from pypdf.generic import Destination
 
 from common.handle.base_split_handle import BaseSplitHandle
+from common.handle.impl.text.pdf_ocr_helper import ocr_document
 from common.utils.logger import maxkb_logger
 from common.utils.split_model import SplitModel, smart_split_paragraph
 from knowledge.models import File
+from maxkb.const import CONFIG
 
 default_pattern_list = [
     re.compile("(?<=^)# .*|(?<=\\n)# .*"),
@@ -33,6 +35,29 @@ default_pattern_list = [
     re.compile("(?<=\\n)(?<!#)###### (?!#).*|(?<=^)(?<!#)###### (?!#).*"),
     re.compile("(?<!\n)\n\n+"),
 ]
+
+# 中文公文常见的标题特征: 一、 / （一） / 第X章|条|节
+# 部分 PDF 的章节标题与正文同字号(仅加粗), 无法通过字号差异识别,
+# 此时按文本特征补充 markdown 标题标记, 保证"按标题分段"能正常生效。
+cn_heading_pattern_list = [
+    (re.compile(r"^[一二三四五六七八九十]+、"), "##"),
+    (re.compile(r"^（[一二三四五六七八九十百]+）"), "###"),
+    (re.compile(r"^第[一二三四五六七八九十百]+[章条节]"), "##"),
+]
+
+
+def is_heading_pattern_enable():
+    value = CONFIG.get("PDF_HEADING_PATTERN_ENABLE", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
+
+
+def match_cn_heading_level(text):
+    for pattern, level in cn_heading_pattern_list:
+        if pattern.match(text):
+            return level
+    return None
 
 
 def check_links_in_pdf(doc):
@@ -118,9 +143,19 @@ class PdfSplitHandle(BaseSplitHandle):
 
             body_font_size = Counter(font_sizes).most_common(1)[0][0]
 
+        # 第三步(提前):整篇都没有文本层, 说明是扫描件(纯图片 PDF)。
+        # pypdf 提取不到任何文本, 继续走原本的逻辑只会得到空内容, 因此改为调用视觉模型做 OCR。
+        has_text = any(text for lines in page_lines for text, _font_size in lines)
+        if not has_text:
+            ocr_content = ocr_document(file.name, pdf_document)
+            if ocr_content:
+                return ocr_content
+            # 未配置视觉模型或识别失败时, 继续走原有逻辑(仅保留页面图片), 保持向后兼容
+
         # 第二步:提取内容
         content = ""
         image_list = []
+        heading_pattern_enable = is_heading_pattern_enable()
         for page_num, page in enumerate(pdf_document.pages):
             start_time = time.time()
 
@@ -135,8 +170,12 @@ class PdfSplitHandle(BaseSplitHandle):
                     content += f"## {text}\n\n"
                 elif size_diff > 0.5:  # 略大于正文
                     content += f"### {text}\n\n"
-                else:  # 正文
-                    content += f"{text}\n"
+                else:  # 正文, 同字号的中文标题按文本特征补充标记
+                    heading_level = match_cn_heading_level(text) if heading_pattern_enable else None
+                    if heading_level is not None:
+                        content += f"{heading_level} {text}\n\n"
+                    else:
+                        content += f"{text}\n"
 
             for image_index in range(PdfSplitHandle.get_page_image_count(page)):
                 try:

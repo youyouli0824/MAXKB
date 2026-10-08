@@ -1,0 +1,38 @@
+# MaxKB 云服务器部署编排（含本次 PDF 分段改动）
+#
+# 用法（在仓库根目录执行）：
+#   docker compose -f docker-compose.server.yml up -d --build
+#   浏览器打开 http://<服务器公网IP>:8080
+#
+# 与本地 docker-compose.yml 的区别：
+#   1) 用 build 把改动打进镜像（服务器上不依赖宿主机源码目录），镜像名 maxkb-patched
+#   2) restart: always —— 服务器重启后自动拉起
+#   3) 数据目录用宿主机 /opt/maxkb（Linux 本地目录，性能与 Docker 卷基本一致）
+#   4) 只在容器里监听 8080，不对公网暴露数据库和 Redis
+
+services:
+  maxkb:
+    build:
+      context: .
+      dockerfile: Dockerfile.patch
+    image: maxkb-patched:v2.10.6-lts
+    container_name: maxkb
+    restart: always
+    ports:
+      # 建议只用安全组放行本端口；想更安全可改成 "127.0.0.1:8080:8080" 由 Nginx/Caddy 反代
+      - "8080:8080"
+    volumes:
+      - /opt/maxkb:/opt/maxkb
+    environment:
+      - TZ=Asia/Shanghai
+      # 首次初始化数据库时生效的初始密码，务必改掉；登录后也请立即再改一次
+      - MAXKB_DEFAULT_PASSWORD=ChangeMe_StrongPwd123
+      # 中文公文标题识别（一、/（一）/第X条 与正文同字号时也能正确分段）
+      - MAXKB_PDF_HEADING_PATTERN_ENABLE=true
+      # 扫描版 PDF 的 OCR 兜底：需先在界面「模型设置」里配置一个视觉模型
+      - MAXKB_PDF_OCR_ENABLE=true
+      - MAXKB_PDF_OCR_MAX_PAGES=100
+      - MAXKB_PDF_OCR_IMAGE_MAX_SIDE=2000
+      - MAXKB_LOG_LEVEL=INFO
+      # 如已在界面里配好视觉模型，也可用下面这行直接指定模型 id，跳过自动挑选
+      # - MAXKB_PDF_OCR_MODEL_ID=
