@@ -13,6 +13,7 @@ from typing import List
 from charset_normalizer import detect
 
 from common.handle.base_split_handle import BaseSplitHandle
+from common.utils.cn_heading import inject_cn_heading_markers, is_cn_heading_enable
 from common.utils.logger import maxkb_logger
 from common.utils.split_model import SplitModel
 
@@ -61,6 +62,11 @@ class TextSplitHandle(BaseSplitHandle):
         except BaseException as e:
             maxkb_logger.error(f"Error processing TEXT file {file.name}: {e}, {traceback.format_exc()}")
             return {'name': file.name, 'content': []}
+        # 智能分段(未指定分段标识)时, 按中文公文标题特征补充 markdown 标记,
+        # 让「（一）（二）」这类条款也能作为标题参与分段。
+        # 高级分段由用户自选分段标识, 不做任何改动。
+        if (pattern_list is None or len(pattern_list) == 0) and is_cn_heading_enable():
+            content = inject_cn_heading_markers(content)
         return {'name': file.name, 'content': split_model.parse(content)}
 
     def get_content(self, file, save_image):

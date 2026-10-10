@@ -1,38 +1,52 @@
-# MaxKB 云服务器部署编排（含本次 PDF 分段改动）
+# MaxKB 云服务器部署编排（镜像由本项目全量源码构建，构建定义见 Dockerfile.app）
 #
 # 用法（在仓库根目录执行）：
 #   docker compose -f docker-compose.server.yml up -d --build
 #   浏览器打开 http://<服务器公网IP>:8080
 #
-# 与本地 docker-compose.yml 的区别：
-#   1) 用 build 把改动打进镜像（服务器上不依赖宿主机源码目录），镜像名 maxkb-patched
-#   2) restart: always —— 服务器重启后自动拉起
-#   3) 数据目录用宿主机 /opt/maxkb（Linux 本地目录，性能与 Docker 卷基本一致）
-#   4) 只在容器里监听 8080，不对公网暴露数据库和 Redis
+# 更推荐的「离线镜像」流程（服务器上不需要源码、也不需要联网构建）：
+#   1) 本机构建并导出：
+#        docker build -f Dockerfile.app -t maxkb-app:v2.10.6-lts .
+#        docker save maxkb-app:v2.10.6-lts | gzip > maxkb-app-v2.10.6-lts.tar.gz
+#   2) 上传到服务器后导入：
+#        gunzip -c maxkb-app-v2.10.6-lts.tar.gz | docker load
+#   3) 服务器上放一份本文件，把 services.maxkb 下的 build: 整段删掉（只留 image: 一行），
+#      然后执行：docker compose -f docker-compose.server.yml up -d
+#
+# 与本地验收编排 docker-compose.yml 的差异：
+#   1) restart: always —— 服务器重启后容器自动拉起
+#   2) 数据目录用宿主机 /opt/maxkb，容器重建后数据不丢
+#   3) 只在容器内监听 8080，不对公网暴露数据库与 Redis
+#
+# 关于一体化镜像：容器内自带 PostgreSQL(pgvector) 与 Redis，
+# MAXKB_DB_HOST / MAXKB_REDIS_HOST 保持默认的 127.0.0.1 即可，无需额外服务。
 
 services:
   maxkb:
     build:
       context: .
-      dockerfile: Dockerfile.patch
-    image: maxkb-patched:v2.10.6-lts
+      dockerfile: Dockerfile.app
+    image: maxkb-app:v2.10.6-lts
     container_name: maxkb
     restart: always
     ports:
-      # 建议只用安全组放行本端口；想更安全可改成 "127.0.0.1:8080:8080" 由 Nginx/Caddy 反代
+      # 建议只用云服务器安全组放行本端口；想更安全可改成 "127.0.0.1:8080:8080" 由 Nginx/Caddy 反代
       - "8080:8080"
     volumes:
-      - /opt/maxkb:/opt/maxkb
+      # 数据目录：数据库、上传文件、日志都在这里，务必挂到宿主机做持久化。
+      # 注意：本机实际数据目录是 /opt/maxkb-data（历史原因），不是 /opt/maxkb；
+      # 挂错会新建一个空目录并起一个空数据库，看起来像"数据丢了"。
+      - /opt/maxkb-data:/opt/maxkb
     environment:
       - TZ=Asia/Shanghai
-      # 首次初始化数据库时生效的初始密码，务必改掉；登录后也请立即再改一次
+      # 首次初始化数据库时生效的初始登录密码，务必改掉；登录后也请立即再改一次
       - MAXKB_DEFAULT_PASSWORD=ChangeMe_StrongPwd123
-      # 中文公文标题识别（一、/（一）/第X条 与正文同字号时也能正确分段）
+      # 中文公文标题识别：一、/（一）/第X章|条|节 与正文同字号时也能正确分段
       - MAXKB_PDF_HEADING_PATTERN_ENABLE=true
-      # 扫描版 PDF 的 OCR 兜底：需先在界面「模型设置」里配置一个视觉模型
+      # 扫描版 PDF 的 OCR 兜底：需先在界面「模型设置」里配置一个视觉模型(IMAGE)
       - MAXKB_PDF_OCR_ENABLE=true
       - MAXKB_PDF_OCR_MAX_PAGES=100
       - MAXKB_PDF_OCR_IMAGE_MAX_SIDE=2000
       - MAXKB_LOG_LEVEL=INFO
-      # 如已在界面里配好视觉模型，也可用下面这行直接指定模型 id，跳过自动挑选
+      # 如需跳过自动挑选、直接指定 OCR 使用的视觉模型，放开下面一行并填模型 id
       # - MAXKB_PDF_OCR_MODEL_ID=

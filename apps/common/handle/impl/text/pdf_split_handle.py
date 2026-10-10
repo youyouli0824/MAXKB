@@ -21,10 +21,10 @@ from pypdf.generic import Destination
 
 from common.handle.base_split_handle import BaseSplitHandle
 from common.handle.impl.text.pdf_ocr_helper import ocr_document
+from common.utils.cn_heading import cn_split_pattern_list, is_cn_heading_enable, match_cn_heading_level
 from common.utils.logger import maxkb_logger
 from common.utils.split_model import SplitModel, smart_split_paragraph
 from knowledge.models import File
-from maxkb.const import CONFIG
 
 default_pattern_list = [
     re.compile("(?<=^)# .*|(?<=\\n)# .*"),
@@ -36,28 +36,10 @@ default_pattern_list = [
     re.compile("(?<!\n)\n\n+"),
 ]
 
-# 中文公文常见的标题特征: 一、 / （一） / 第X章|条|节
-# 部分 PDF 的章节标题与正文同字号(仅加粗), 无法通过字号差异识别,
-# 此时按文本特征补充 markdown 标题标记, 保证"按标题分段"能正常生效。
-cn_heading_pattern_list = [
-    (re.compile(r"^[一二三四五六七八九十]+、"), "##"),
-    (re.compile(r"^（[一二三四五六七八九十百]+）"), "###"),
-    (re.compile(r"^第[一二三四五六七八九十百]+[章条节]"), "##"),
-]
-
-
-def is_heading_pattern_enable():
-    value = CONFIG.get("PDF_HEADING_PATTERN_ENABLE", True)
-    if isinstance(value, str):
-        return value.strip().lower() not in ("false", "0", "no", "off", "")
-    return bool(value)
-
-
-def match_cn_heading_level(text):
-    for pattern, level in cn_heading_pattern_list:
-        if pattern.match(text):
-            return level
-    return None
+# 中文公文标题识别(一、 / （一） / 第X章|条|节)已统一到 common.utils.cn_heading,
+# 由 PDF 正文、PDF 书签、文本三条链路共用同一套规则。
+# 保留 is_heading_pattern_enable 名称以兼容既有调用点。
+is_heading_pattern_enable = is_cn_heading_enable
 
 
 def check_links_in_pdf(doc):
@@ -98,7 +80,7 @@ class PdfSplitHandle(BaseSplitHandle):
                 if type(with_filter) is str:
                     with_filter = with_filter.lower() == "true"
                 # 处理有目录的pdf
-                result = self.handle_toc(pdf_document, limit)
+                result = self.handle_toc(pdf_document, limit, with_filter)
                 if result is not None:
                     return {"name": file.name, "content": result}
 
@@ -347,7 +329,7 @@ class PdfSplitHandle(BaseSplitHandle):
         ]
 
     @staticmethod
-    def handle_toc(doc, limit):
+    def handle_toc(doc, limit, with_filter=True):
         # 找到目录
         toc = PdfSplitHandle.get_toc(doc)
         if toc is None or len(toc) == 0:
@@ -360,10 +342,23 @@ class PdfSplitHandle(BaseSplitHandle):
         # 创建存储章节内容的数组
         chapters = []
 
+        # 书签层级栈: 给条款段补上所属章节标题, 形成 "一、xxx （一）yyy" 这样的标题链
+        parent_stack = []
+
         # 遍历目录并按章节提取文本
         for i, entry in enumerate(toc):
             level, title, start_page, start_top = entry
             chapter_title = title
+
+            # 维护书签层级栈, 取出当前书签的父级标题链。
+            # 噪声书签(正文句子被做成书签)不参与层级计算, 否则会把正常章节挤下栈,
+            # 导致后面一整串条款都丢掉章节标题。
+            is_parent_title = PdfSplitHandle.is_toc_parent_title(chapter_title)
+            if is_parent_title:
+                while len(parent_stack) > 0 and parent_stack[-1][0] >= level:
+                    parent_stack.pop()
+            parent_chain = [item[1] for item in parent_stack]
+
             # 确定结束页码，如果是最后一个章节则到文档末尾
             if i + 1 < len(toc):
                 _next_level, next_title, next_start_page, next_top = toc[i + 1]
@@ -380,53 +375,130 @@ class PdfSplitHandle(BaseSplitHandle):
             # 去掉标题中的符号
             title = PdfSplitHandle.handle_chapter_title(title)
 
+            # 书签本身是条款级标题(「（一）」/「第X条」)时, 抽到的正文就是条款全文,
+            # 此时剥掉开头的标题文字只会剩下断句残余(如 "保经办机构负责具体实施工作。"),
+            # 因此这类书签不剥标题, 正文保留条款全文。
+            is_clause_bookmark = match_cn_heading_level(chapter_title) == "###"
+
             # 提取该章节的文本内容
+            # chapter_text: 压行后的文本(保持原有行为); chapter_raw: 保留换行,
+            # 用于按行识别「（一）」这类中文条款标题。
             chapter_text = ""
+            chapter_raw = ""
             for page_num in range(start_page, end_page + 1):
                 page_top = start_top if page_num == start_page else None
                 page_bottom = next_top if page_num == next_start_page else None
-                text = PdfSplitHandle.extract_page_text_by_position(doc.pages[page_num], page_top, page_bottom)
-                text = re.sub(r"(?<!。)\n+", "", text)
+                raw_text = PdfSplitHandle.extract_page_text_by_position(doc.pages[page_num], page_top, page_bottom)
+                text = re.sub(r"(?<!。)\n+", "", raw_text)
                 text = re.sub(r"(?<!.)\n+", "", text)
 
-                if page_num == start_page:
+                if page_num == start_page and not is_clause_bookmark:
                     if start_top is not None:
                         text = PdfSplitHandle.remove_leading_title(text, chapter_title, title)
+                        raw_text = PdfSplitHandle.remove_leading_title(raw_text, chapter_title, title)
                     else:
                         idx = text.find(title)
                         if idx > -1:
                             text = text[idx + len(title) :]
+                        idx = raw_text.find(title)
+                        if idx > -1:
+                            raw_text = raw_text[idx + len(title) :]
 
                 if next_title is not None and next_top is None:
                     handled_next_title = PdfSplitHandle.handle_chapter_title(next_title)
                     idx = text.find(handled_next_title)
                     if idx > -1:
                         text = text[:idx]
+                    idx = raw_text.find(handled_next_title)
+                    if idx > -1:
+                        raw_text = raw_text[:idx]
 
                 chapter_text += text  # 提取文本
+                chapter_raw += raw_text
 
             # Null characters are not allowed.
             chapter_text = chapter_text.replace("\0", "")
-            # 限制标题长度
-            real_chapter_title = chapter_title[:256]
-            # 限制章节内容长度
-            if 0 < limit < len(chapter_text):
-                split_text = smart_split_paragraph(chapter_text, limit)
-                for text in split_text:
+            chapter_raw = chapter_raw.replace("\0", "")
+
+            if is_clause_bookmark:
+                # 书签本身就是条款: 正文即条款全文, 标题用所属章节链, 不再二次切分;
+                # 但过长的条款仍按 limit 截断, 与其它分支保持一致。
+                real_chapter_title = " ".join(parent_chain)[:256] or chapter_title[:256]
+                clause_content = chapter_text if chapter_text.strip() else chapter_title
+                if 0 < limit < len(clause_content):
+                    for text in smart_split_paragraph(clause_content, limit):
+                        chapters.append({"title": real_chapter_title, "content": text})
+                else:
                     chapters.append(
-                        {"title": real_chapter_title, "content": text.encode("utf-8", "ignore").decode("utf-8")}
+                        {
+                            "title": real_chapter_title,
+                            "content": clause_content.encode("utf-8", "ignore").decode("utf-8"),
+                        }
                     )
             else:
-                chapters.append(
-                    {
-                        "title": real_chapter_title,
-                        "content": (chapter_text if chapter_text else real_chapter_title)
-                        .encode("utf-8", "ignore")
-                        .decode("utf-8"),
-                    }
+                # 限制标题长度: 补上父级标题链, 让章节正文里的条款段也能看到所属章节
+                real_chapter_title = " ".join([*parent_chain, chapter_title])[:256]
+                # 书签标题本身就是条款正文时, 抽到的 "正文" 往往只剩几个字的残余(如 "定。"),
+                # 这种分段检索不到内容, 把标题文字并回正文, 标题退回到所属章节。
+                if 0 < len(chapter_text.strip()) < 10 and len(chapter_title) > 20:
+                    chapter_text = chapter_title + chapter_text
+                    real_chapter_title = " ".join(parent_chain)[:256] or chapter_title[:256]
+
+                # 章节正文里存在条款标题时按条款切分, 否则回退原有的按长度切分
+                clause_paragraphs = PdfSplitHandle.split_chapter_by_cn_heading(
+                    chapter_raw, real_chapter_title, limit, with_filter
                 )
-            # 保存章节内容和章节标题
+                if clause_paragraphs is not None:
+                    chapters.extend(clause_paragraphs)
+                elif 0 < limit < len(chapter_text):
+                    split_text = smart_split_paragraph(chapter_text, limit)
+                    for text in split_text:
+                        chapters.append(
+                            {"title": real_chapter_title, "content": text.encode("utf-8", "ignore").decode("utf-8")}
+                        )
+                else:
+                    chapters.append(
+                        {
+                            "title": real_chapter_title,
+                            "content": (chapter_text if chapter_text else real_chapter_title)
+                            .encode("utf-8", "ignore")
+                            .decode("utf-8"),
+                        }
+                    )
+            # 保存章节内容和章节标题: 只有真正的标题才压栈
+            if is_parent_title:
+                parent_stack.append((level, chapter_title))
         return chapters
+
+    @staticmethod
+    def is_toc_parent_title(title):
+        """判断书签是否可以作为父级章节标题; 以句号结尾的长书签通常是正文句子。"""
+        text = (title or "").strip()
+        if not text:
+            return False
+        return not (len(text) > 20 and text.endswith("。"))
+
+    @staticmethod
+    def split_chapter_by_cn_heading(chapter_raw, chapter_title, limit, with_filter):
+        """
+        章节正文里存在「（一）（二）」这类中文条款标题时, 按条款切分,
+        并把章节标题前置到每个条款标题上, 形成完整标题链。
+        未识别到任何条款标题时返回 None, 由调用方回退到原有的按长度切分逻辑。
+        """
+        pattern_list = cn_split_pattern_list()
+        if not any(pattern.search(chapter_raw) for pattern in pattern_list):
+            return None
+        split_model = SplitModel(pattern_list, with_filter, limit)
+        result = []
+        for paragraph in split_model.parse(chapter_raw):
+            paragraph_title = paragraph.get("title") or ""
+            result.append(
+                {
+                    "title": " ".join([chapter_title, paragraph_title]).strip()[:256],
+                    "content": paragraph.get("content"),
+                }
+            )
+        return result
 
     @staticmethod
     def handle_links(doc, pattern_list, with_filter, limit):

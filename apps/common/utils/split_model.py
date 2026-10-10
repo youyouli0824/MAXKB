@@ -43,10 +43,17 @@ def to_tree_obj(content, state='title'):
 def remove_special_symbol(str_source: str):
     """
     删除特殊字符
+
+    SplitModel 用正则匹配到的整行文本作为标题(含 markdown 标题标记),
+    这里只去掉标题前缀的 #, 让 "#" 不会混进最终的分段标题或正文。
+    注意: 只删 # 本身、保留其余空白, 这样标题在原文中的偏移量与改动前一致,
+    分段内容的切分点不会漂移。
     :param str_source: 需要删除的文本数据
     :return: 删除后的数据
     """
-    return str_source
+    if not str_source:
+        return str_source
+    return re.sub(r"^#+", "", str_source)
 
 
 def filter_special_symbol(content: dict):

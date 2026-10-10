@@ -33,6 +33,7 @@ from common.handle.impl.text.text_split_handle import TextSplitHandle
 from common.handle.impl.text.xls_split_handle import XlsSplitHandle
 from common.handle.impl.text.xlsx_split_handle import XlsxSplitHandle
 from common.handle.impl.text.zip_split_handle import ZipSplitHandle
+from common.utils.cn_heading import cn_split_pattern_options
 from common.utils.common import bulk_create_in_batches, get_file_content, parse_file_link, parse_image, post
 from common.utils.fork import Fork
 from common.utils.logger import maxkb_logger
@@ -1309,7 +1310,7 @@ class DocumentSerializers(serializers.Serializer):
                 {"key": _("period"), "value": "(?<!。)。(?!。)"},
                 {"key": _("enter"), "value": "(?<!\\n)\\n(?!\\n)"},
                 {"key": _("blank line"), "value": "(?<!\\n)\\n\\n(?!\\n)"},
-            ]
+            ] + cn_split_pattern_options()
 
     class Batch(serializers.Serializer):
         workspace_id = serializers.CharField(required=True, label=_("workspace id"))
